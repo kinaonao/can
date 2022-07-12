@@ -1,0 +1,12 @@
+Start
+
+Logging end. File output in progress.
+
+Logging time : 1802.927775144577
+
+File_output_time : 2.5694823265075684
+
+type:<class 'NoneType'>
+None
+type(str):None
+None
