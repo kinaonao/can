@@ -2,6 +2,10 @@
 #----------------------------------------------------------------------------------
 #TODO IGOFF信号が一瞬しか受信できないため、信号をラッチする処理を追記
 #TODO 今まではCANの情報をすべて保存するしか無かったが必要な情報だけを保存する処理を追加
+#TODO 受信がしばらくなかった場合の判断ができるようにする。(回転数情報を見て判断する処理を追加済み。動作確認未実施)
+#TODO ラズパイで電源投入後に自動でモニタが開始されるように変更
+#TODO CANを受信したらロギングを開始するように変更(今のままではすぐにエンジンを始動しないと自動的にロギングが止まってしまう。)
+#TODO ロギングデータをフォルダに格納するように変更する
 #----------------------------------------------------------------------------------
 
 #CANを受信するコード
@@ -29,6 +33,17 @@ def cal_hex2bin_1byte(data_name):#16進数の文字列を1バイト分受け取�
     data_bin = format(data_int,"08b")
     #print(data_bin)
     return data_bin
+
+def receive_check(pre_value,now_value):#前回値と比較して受信が止まっているか判断する
+    global receive_counter
+    global f_not_receive
+    if pre_value == now_value:
+        receive_counter += 1
+    else:
+        receive_counter -= 1
+
+    if receive_counter == ERROR_VALUE:#カウンターが指定の値まで上昇したらフラグを立てる。
+        f_not_receive = 1
 
 #----------------------------------------------------------------------------------
 
@@ -65,90 +80,103 @@ fuel_remain = 0
 fuel_economy = 0
 car_speed = 0
 rpm = 0
-IG_OFF_FLAG = 0
-IG_OFF_FLAG_RATCH = 0
+ig_off_flag = 0
+ig_off_flag_ratch = 0
+receive_counter =0
+f_not_receive = 0#受信が無かったら1になる。
+pre_rpm = 0
+#----------------------------------------------------------------------------------
+
+#DEFINE定義
+#----------------------------------------------------------------------------------
+ERROR_VALUE = 50
 #----------------------------------------------------------------------------------
 
 
-while (msg != None) or (IG_OFF_FLAG_RATCH == 0):#message None or IGON
-    msg = can0.recv(10.0)
-    msg_list = [x.strip() for x in str(msg).split()]#空白を削除して配列に格納
-    #print(msg_list)
-    list.append(msg)#データ保存用に受信データをリストに格納 
-    if len(msg_list) > 3:#エンジン停止後のECUスリープ前にメッセージがタイムスタンプのみ保存され、msg_list[3]の処理が要素外アクセスエラーが発生するため回避用
-        if msg_list[3] == "0158":
-            # car_speed = cal_hex2dec_2byte(msg_list[7],msg_list[8])*0.01 #車速情報(python-CANのバージョンが4未満)
-            car_speed = cal_hex2dec_2byte(msg_list[8],msg_list[9])*0.01 #車速情報(python-CANのバージョンが4以上)
-            # distance_after = cal_hex2dec_1byte(msg_list[13])*0.01#距離情報(kmに変換)(python-CANのバージョンが4未満)
-            distance_after = cal_hex2dec_1byte(msg_list[14])*0.01#距離情報(kmに変換)(python-CANのバージョンが4以上)
+if __name__ == '__main__':
+    while (msg != None) and (ig_off_flag_ratch == 0) and (f_not_receive == 0):#message None or IGON どれか一つでも条件を満たしたら抜ける
+        msg = can0.recv(10.0)
+        msg_list = [x.strip() for x in str(msg).split()]#空白を削除して配列に格納
+        #print(msg_list)
+        list.append(msg)#データ保存用に受信データをリストに格納 
+        if len(msg_list) > 3:#エンジン停止後のECUスリープ前にメッセージがタイムスタンプのみ保存され、msg_list[3]の処理が要素外アクセスエラーが発生するため回避用
+            if msg_list[3] == "0158":
+                # car_speed = cal_hex2dec_2byte(msg_list[7],msg_list[8])*0.01 #車速情報(python-CANのバージョンが4未満)
+                car_speed = cal_hex2dec_2byte(msg_list[8],msg_list[9])*0.01 #車速情報(python-CANのバージョンが4以上)
+                # distance_after = cal_hex2dec_1byte(msg_list[13])*0.01#距離情報(kmに変換)(python-CANのバージョンが4未満)
+                distance_after = cal_hex2dec_1byte(msg_list[14])*0.01#距離情報(kmに変換)(python-CANのバージョンが4以上)
 
-            if ((distance_after - distance_before) >= 0 ):#カウンターが255までなので、1周する前の処理
-                distance += (distance_after - distance_before)
-                distance_before = distance_after
+                if ((distance_after - distance_before) >= 0 ):#カウンターが255までなので、1周する前の処理
+                    distance += (distance_after - distance_before)
+                    distance_before = distance_after
+                else:
+                    distance += ((2.55-distance_before) + distance_after)#カウンターが255までなので、1周したあとの処理
+                    distance_before = distance_after
+
+            elif msg_list[3] == "013a":
+                # gas_pedal_open = cal_hex2dec_1byte(msg_list[8])#アクセル開度情報
+                gas_pedal_open = cal_hex2dec_1byte(msg_list[9])#アクセル開度情報
+            
+            elif msg_list[3] == "0324":
+                # water_temp = cal_hex2dec_1byte(msg_list[7])-40#水温情報(51℃以上で警告灯消灯、71℃で暖気終了) 
+                water_temp = cal_hex2dec_1byte(msg_list[8])-40#水温情報(51℃以上で警告灯消灯、71℃で暖気終了) 
+                # fi_total = cal_hex2dec_2byte(msg_list[9],msg_list[10])*0.10886#燃料噴出量積算値ml(エンジン停止で0)
+                fi_total = cal_hex2dec_2byte(msg_list[10],msg_list[11])*0.10886#燃料噴出量積算値ml(エンジン停止で0)
+
+                fi_diff = fi_total - fi_before#インジェクション噴出量の最新値と前回値の差分を格納(瞬間燃費を求める)
+                fi_before = fi_total#値の更新
+                ID324_6byte = cal_hex2bin_1byte(msg_list[14])
+                ig_off_flag = ID324_6byte[-4]#IG2→IG1になったら1になる。(エンジンを切った後もECUのスリープ処理？でECUがデータを送り続けてしまうため、ロギング停止処理用として使用)
+                if ig_off_flag == 1:
+                    ig_off_flag_ratch = 1#一度でもIGOFFの信号を受信したらラッチする。
+                #IG_OFF_FLAG = ID324_6byte#debag
+                #print("IGOFF_FLAG")
+                #print(IG_OFF_FLAG)
+            elif msg_list[3] == "0164":
+                # fuel_remain = cal_hex2dec_1byte(msg_list[10])
+                fuel_remain = cal_hex2dec_1byte(msg_list[11])
+
+            elif msg_list[3] == "017c":
+                # rpm = cal_hex2dec_2byte(msg_list[9],msg_list[10])#回転数情報        
+                rpm = cal_hex2dec_2byte(msg_list[10],msg_list[11])#回転数情報
             else:
-                distance += ((2.55-distance_before) + distance_after)#カウンターが255までなので、1周したあとの処理
-                distance_before = distance_after
+                receive_check(rpm,pre_rpm)#前回値と比較する
+                pre_rpm = rpm#前回値を格納
 
-        elif msg_list[3] == "013a":
-            # gas_pedal_open = cal_hex2dec_1byte(msg_list[8])#アクセル開度情報
-            gas_pedal_open = cal_hex2dec_1byte(msg_list[9])#アクセル開度情報
-        
-        elif msg_list[3] == "0324":
-            # water_temp = cal_hex2dec_1byte(msg_list[7])-40#水温情報(51℃以上で警告灯消灯、71℃で暖気終了) 
-            water_temp = cal_hex2dec_1byte(msg_list[8])-40#水温情報(51℃以上で警告灯消灯、71℃で暖気終了) 
-            # fi_total = cal_hex2dec_2byte(msg_list[9],msg_list[10])*0.10886#燃料噴出量積算値ml(エンジン停止で0)
-            fi_total = cal_hex2dec_2byte(msg_list[10],msg_list[11])*0.10886#燃料噴出量積算値ml(エンジン停止で0)
+            if (distance != 0) and (fi_total != 0):
+                fuel_economy = distance/(fi_total/1000)#燃料噴出量をℓに変換したうえで燃費を求める
+            print("\r car_speed: %lf [km/h] \n rpm : %lf [rpm] \n distance: %lf [km] \n gas_pedal_open: %lf [%%] \n water_temp: %lf [℃] \n fuel_remain : %lf [%%] \n FI_total: %lf [ml] \n FI_diff:%lf [ml] \n fuel_economy: %lf [km/l]  \033[8A" %(car_speed, rpm, distance, gas_pedal_open, water_temp, fuel_remain, fi_total, fi_diff, fuel_economy), end =" ")#必要な情報を表示
 
-            fi_diff = fi_total - fi_before#インジェクション噴出量の最新値と前回値の差分を格納(瞬間燃費を求める)
-            fi_before = fi_total#値の更新
-            ID324_6byte = cal_hex2bin_1byte(msg_list[14])
-            IG_OFF_FLAG = ID324_6byte[-4]#IG2→IG1になったら1になる。(エンジンを切った後もECUのスリープ処理？でECUがデータを送り続けてしまうため、ロギング停止処理用として使用)
-            if IG_OFF_FLAG == 1:
-                IG_OFF_FLAG_RATCH = 1#一度でもIGOFFの信号を受信したらラッチする。
-            #IG_OFF_FLAG = ID324_6byte#debag
-            #print("IGOFF_FLAG")
-            #print(IG_OFF_FLAG)
-        elif msg_list[3] == "0164":
-            # fuel_remain = cal_hex2dec_1byte(msg_list[10])
-            fuel_remain = cal_hex2dec_1byte(msg_list[11])
+        else:
+            print("\033[8B")#カーソルを元の位置に戻す
+            print("ECU Sleep")
 
-        elif msg_list[3] == "017c":
-            # rpm = cal_hex2dec_2byte(msg_list[9],msg_list[10])#回転数情報        
-            rpm = cal_hex2dec_2byte(msg_list[10],msg_list[11])#回転数情報
-        if (distance != 0) and (fi_total != 0):
-            fuel_economy = distance/(fi_total/1000)#燃料噴出量をℓに変換したうえで燃費を求める
-        print("\r car_speed: %lf [km/h] \n rpm : %lf [rpm] \n distance: %lf [km] \n gas_pedal_open: %lf [%%] \n water_temp: %lf [℃] \n fuel_remain : %lf [%%] \n FI_total: %lf [ml] \n FI_diff:%lf [ml] \n fuel_economy: %lf [km/l]  \033[8A" %(car_speed, rpm, distance, gas_pedal_open, water_temp, fuel_remain, fi_total, fi_diff, fuel_economy), end =" ")#必要な情報を表示
 
+    loging_time = time.time() -loging_time
+    if (msg is None) or (ig_off_flag_ratch == 1) or (f_not_receive == 1):#メッセージが流れなくなるかエンジンが切られたらロギング終了
+    #if (msg is None):
+        print("Logging end. File output in progress.\n",file=file)
+        print("Logging end. File output in progress.")
+
+        df=pd.DataFrame(list)
+        file_out_put_time = time.time()
+        df.to_csv(f_name)
+        file_out_put_time = time.time() - file_out_put_time
+        # print("Finish\n\n",file=file)
+        print("Finish_OUTPUT_DATA\n")
+        print("START_OUTPUT_LOGING_TIME")
+        print("Logging time : "+str(loging_time)+"\n",file=file)
+        print("File_output_time : "+str(file_out_put_time)+"\n",file=file)
+        print("type:"+str(type(msg)),file=file)
+        print(msg,file=file)
+        print("type(str):"+str(msg),file=file)
+        print(str(msg),file=file)
+        ig_off_flag_ratch= 0#念のためIG信号のラッチを解除
     else:
-        print("\033[8B")#カーソルを元の位置に戻す
-        print("ECU Sleep")
-
-
-loging_time = time.time() -loging_time
-if (msg is None) or (IG_OFF_FLAG_RATCH == 1):#メッセージが流れなくなるかエンジンが切られたらロギング終了
-#if (msg is None):
-    print("Logging end. File output in progress.\n",file=file)
-    print("Logging end. File output in progress.")
-
-    df=pd.DataFrame(list)
-    file_out_put_time = time.time()
-    df.to_csv(f_name)
-    file_out_put_time = time.time() - file_out_put_time
-    # print("Finish\n\n",file=file)
-    print("Finish_OUTPUT_DATA\n")
-    print("START_OUTPUT_LOGING_TIME")
-    print("Logging time : "+str(loging_time)+"\n",file=file)
-    print("File_output_time : "+str(file_out_put_time)+"\n",file=file)
-    print("type:"+str(type(msg)),file=file)
-    print(msg,file=file)
-    print("type(str):"+str(msg),file=file)
-    print(str(msg),file=file)
-    IG_OFF_FLAG_RATCH = 0#念のためIG信号のラッチを解除
-else:
-    print("ERROR",file=file)
-    print("File NOT SAVED",file=file)
-    print(traceback.format_exc(),file = file)
-    
-    
-file.close()
-os.system('sudo ifconfig can0 down')
+        print("ERROR",file=file)
+        print("File NOT SAVED",file=file)
+        print(traceback.format_exc(),file = file)
+        
+        
+    file.close()
+    os.system('sudo ifconfig can0 down')
